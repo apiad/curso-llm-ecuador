@@ -67,7 +67,7 @@ def initialize_agent():
     )
 
     agent = argo.ChatAgent(
-        name="ArgoRAG",
+        name="Manolo",
         description="A helpful assistant that answers questions based on a document knowledge base.",
         llm=llm,
         skills=[chat],  # Pre-built casual chat skill

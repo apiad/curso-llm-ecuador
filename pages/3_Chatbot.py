@@ -1,7 +1,9 @@
 import streamlit as st
+import pydantic
 from beaver import BeaverDB
 from fastembed import TextEmbedding
 import argo
+from argo import Message
 from argo.client import stream
 from argo.skills import chat
 import os
@@ -44,9 +46,14 @@ def search_knowledge_base(query: str) -> List[str]:
     query_embedding = list(embedding_model.embed(query))[0]
     docs_collection = db.collection(COLLECTION_NAME)
 
-    search_results = docs_collection.search(vector=query_embedding.tolist(), top_k=3)
+    search_results = docs_collection.search(vector=query_embedding.tolist(), top_k=5)
 
-    return [doc.text for doc, distance in search_results]
+    return [doc for doc, distance in search_results]
+
+
+class Summary(pydantic.BaseModel):
+    summary: str
+    relevant: bool
 
 
 @st.cache_resource
@@ -90,13 +97,34 @@ def initialize_agent():
             )
             return
 
-        context_str = "\n\n---\n\n".join(retrieved_docs)
+        context = []
+
+        for doc in retrieved_docs:
+            summary = await llm.create(
+                model=Summary,
+                messages=[
+                    Message.system(
+                        f"Summarize the following text in a concise manner given the user query, and determine if its relevant for the user query.\n\nQuery: {user_query}."
+                    ),
+                    Message.user(doc.text),
+                ],
+            )
+
+            if summary.relevant:
+                context.append(dict(text=summary.summary, source_file=doc.source_file))
+
+        context_str = "\n\n---\n\n".join(
+            "Filename: {}\n\nContent:\n{}".format(doc["source_file"], doc["text"])
+            for doc in context
+        )
 
         # 2. Add the context to the conversation for the LLM
         system_prompt = f"""
         You are a helpful assistant. Please answer the user's question based ONLY on the
         following context. If the context does not contain the answer, state that you
         could not find the information in the provided documents.
+
+        Beside every claim, put the source filename in parentheses.
 
         Context:
         {context_str}

@@ -1,3 +1,5 @@
 .venv
 *.db
 .env
+knowledge_base.db-shm
+knowledge_base.db-wal

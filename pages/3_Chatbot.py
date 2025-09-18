@@ -1,4 +1,5 @@
 import streamlit as st
+from datetime import datetime
 import pydantic
 from beaver import BeaverDB
 from fastembed import TextEmbedding
@@ -55,6 +56,16 @@ class Summary(pydantic.BaseModel):
     summary: str
     relevant: bool
 
+class Event(pydantic.BaseModel):
+    title: str
+    date: datetime
+    description: str
+
+
+class Calendar:
+    def __init__(self, *events):
+        self.events = list(events)
+
 
 @st.cache_resource
 def initialize_agent():
@@ -80,43 +91,64 @@ def initialize_agent():
         skills=[chat],  # Pre-built casual chat skill
     )
 
+    agent.calendar = Calendar(
+        Event(title="Meeting with Bob", date=datetime(2025, 9, 18, 15, 0), description="Discuss project updates."),
+        Event(title="Dentist Appointment", date=datetime(2025, 10, 10, 10, 30), description="Routine check-up."),
+    )
+
+    @agent.skill
+    async def handle_calendar(ctx: argo.Context):
+        """
+        Handles calendar-related queries.
+        Use this for general questions about dates, days of the week, months, etc.
+        The schedule of user events, add new events, and list existing events.
+        """
+
+        ctx.add(Message.system(f"Today is: {datetime.now().strftime('%Y-%m-%d')}"))
+
+        tool = await ctx.equip(tools=[list_calendar, add_event])
+        result = await ctx.invoke(tool)
+
+        ctx.add(Message.system(result))
+
+        await ctx.reply()
+
+
+    @agent.tool
+    async def add_event(title: str, date: datetime, description: str):
+        """
+        Adds a new event to the user calendar.
+        """
+
+        agent.calendar.events.append(
+            Event(title=title, date=date, description=description)
+        )
+
+        return f"Event '{title}' added on {date.strftime('%Y-%m-%d %H:%M')}."
+
+
+    @agent.tool
+    async def list_calendar(from_date: datetime):
+        """Lists all events in the user's calendar."""
+        events = agent.calendar.events
+
+        if not events:
+            return "No events scheduled."
+
+        event_list = "\n".join(
+            f"- {event.title} on {event.date.strftime('%Y-%m-%d %H:%M')}: {event.description}"
+            for event in events if event.date.timetuple() >= from_date.timetuple()
+        )
+
+        return event_list
+
     @agent.skill
     async def question_answering(ctx: argo.Context):
         """
         Answers user questions that require knowledge from the indexed documents.
         Use this for any specific questions that cannot be answered with general knowledge.
         """
-        user_query = ctx.messages[-1].content
-
-        # 1. Retrieve context from BeaverDB
-        retrieved_docs = search_knowledge_base(user_query)
-
-        if not retrieved_docs:
-            await ctx.reply(
-                "I couldn't find any relevant information in the indexed documents to answer your question."
-            )
-            return
-
-        context = []
-
-        for doc in retrieved_docs:
-            summary = await llm.create(
-                model=Summary,
-                messages=[
-                    Message.system(
-                        f"Summarize the following text in a concise manner given the user query, and determine if its relevant for the user query.\n\nQuery: {user_query}."
-                    ),
-                    Message.user(doc.text),
-                ],
-            )
-
-            if summary.relevant:
-                context.append(dict(text=summary.summary, source_file=doc.source_file))
-
-        context_str = "\n\n---\n\n".join(
-            "Filename: {}\n\nContent:\n{}".format(doc["source_file"], doc["text"])
-            for doc in context
-        )
+        result = await ctx.invoke(search_kb)
 
         # 2. Add the context to the conversation for the LLM
         system_prompt = f"""
@@ -127,13 +159,45 @@ def initialize_agent():
         Beside every claim, put the source filename in parentheses.
 
         Context:
-        {context_str}
+        {result.result}
         """
 
         ctx.add(argo.Message.system(system_prompt))
 
         # 3. Generate the reply
         await ctx.reply("Reply with the information in the context.")
+
+    @agent.tool
+    async def search_kb(query: str):
+        """
+        Finds relevant documents in the knowledge base.
+        """
+        # 1. Retrieve context from BeaverDB
+        retrieved_docs = search_knowledge_base(query)
+
+        if not retrieved_docs:
+            return "I couldn't find any relevant information in the indexed documents to answer your question."
+
+        context = []
+
+        for doc in retrieved_docs:
+            summary = await llm.create(
+                model=Summary,
+                messages=[
+                    Message.system(
+                        f"Summarize the following text in a concise manner given the user query, and determine if its relevant for the user query.\n\nQuery: {query}."
+                    ),
+                    Message.user(doc.text),
+                ],
+            )
+
+            if summary.relevant:
+                context.append(dict(text=summary.summary, source_file=doc.source_file))
+
+        return "\n\n---\n\n".join(
+            "Filename: {}\n\nContent:\n{}".format(doc["source_file"], doc["text"])
+            for doc in context
+        )
 
     return agent
 
